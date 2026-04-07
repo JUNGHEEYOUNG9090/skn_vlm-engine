@@ -1,49 +1,65 @@
-import runpod
+import os
 import torch
+import runpod
 from PIL import Image
 import requests
 from io import BytesIO
 from transformers import CLIPProcessor, CLIPModel
 
-# 1. 모델 로드 (서버 시작 시 한 번만 실행됨)
+# GPU 설정
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-# local_files_only=True 추가 및 .to(device)로 메모리에 올리기
-model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32", local_files_only=True).to(device)
-processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32", local_files_only=True)
+# [핵심] 모델을 저장할 절대 경로 (런팟 볼륨 주소)
+MODEL_NAME = "openai/clip-vit-base-patch32"
+SAVE_PATH = "/runpod-volume/clip_model"
+
+def load_model():
+    # 저장된 폴더가 없으면 새로 다운로드
+    if not os.path.exists(SAVE_PATH):
+        print(f"--- 모델이 없습니다. 최초 1회 다운로드를 시작합니다: {MODEL_NAME} ---")
+        temp_model = CLIPModel.from_pretrained(MODEL_NAME)
+        temp_processor = CLIPProcessor.from_pretrained(MODEL_NAME)
+        
+        # 지정된 경로에 모델 저장
+        temp_model.save_pretrained(SAVE_PATH)
+        temp_processor.save_pretrained(SAVE_PATH)
+        print(f"--- 모델 저장 완료: {SAVE_PATH} ---")
+    
+    # 저장된 경로(로컬)에서 모델 불러오기 (인터넷 안 씀)
+    print("--- 로컬 볼륨에서 모델을 로드합니다 ---")
+    model = CLIPModel.from_pretrained(SAVE_PATH).to(device)
+    processor = CLIPProcessor.from_pretrained(SAVE_PATH)
+    return model, processor
+
+# 모델 로드 (전역 변수)
+model, processor = load_model()
 
 def handler(job):
     """
-    main.py에서 보낸 {'images': [url1, url2, ...]} 데이터를 처리합니다.
+    런팟 서버리스 호출 시 실행되는 메인 함수
     """
-    job_input = job['input']
-    image_urls = job_input.get("images", [])
+    job_input = job["input"]
+    image_url = job_input.get("image_url")
     
-    if not image_urls:
-        return {"error": "No image URLs provided"}
+    if not image_url:
+        return {"error": "image_url is required"}
 
-    results = []
-    
-    for url in image_urls:
-        try:
-            # 2. S3 URL(Presigned)에서 이미지 다운로드
-            response = requests.get(url, timeout=10)
-            image = Image.open(BytesIO(response.content)).convert("RGB")
-            
-            # 3. CLIP 모델로 임베딩 추출
-            inputs = processor(images=image, return_tensors="pt").to(device)
-            with torch.no_grad():
-                image_features = model.get_image_features(**inputs)
-            
-            # 4. 텐서를 리스트로 변환 (JSON 응답용)
-            embedding = image_features.cpu().numpy().tolist()[0]
-            results.append(embedding)
-            
-        except Exception as e:
-            print(f"Error processing {url}: {e}")
-            results.append(None) 
+    try:
+        # 이미지 다운로드 및 처리
+        response = requests.get(image_url)
+        image = Image.open(BytesIO(response.content)).convert("RGB")
+        
+        inputs = processor(images=image, return_tensors="pt").to(device)
+        
+        with torch.no_grad():
+            image_features = model.get_image_features(**inputs)
+        
+        # 결과를 리스트로 변환하여 반환
+        embedding = image_features.cpu().numpy().tolist()[0]
+        return {"embedding": embedding}
 
-    return results
+    except Exception as e:
+        return {"error": str(e)}
 
 # 런팟 서버리스 시작
 runpod.serverless.start({"handler": handler})
