@@ -9,30 +9,37 @@ from transformers import CLIPProcessor, CLIPModel
 # GPU 설정
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-# [핵심] 우리가 직접 만들고 관리할 모델 창고 주소
+# [가장 중요] 모델을 저장할 우리만의 확실한 창고 주소
 SAVE_PATH = "/runpod-volume/clip_model"
 MODEL_ID = "openai/clip-vit-base-patch32"
 
 def load_model():
-    # 1. 만약 지정한 폴더에 모델이 없으면? 여기서 직접 다운로드합니다.
+    print(f"--- 모델 로드 프로세스 시작 ---")
+    
+    # 1. 창고에 모델이 있는지 확인
     if not os.path.exists(SAVE_PATH):
-        print(f"--- 모델이 없어서 직접 다운로드합니다: {MODEL_ID} ---")
-        # 이때는 인터넷 연결이 필요하므로 local_files_only를 쓰지 않습니다.
+        print(f"--- [최초 1회] 창고가 비어있습니다. 모델 다운로드를 시작합니다... ---")
+        # 폴더 생성
+        os.makedirs(SAVE_PATH, exist_ok=True)
+        
+        # 인터넷에서 모델 가져오기
         model = CLIPModel.from_pretrained(MODEL_ID)
         processor = CLIPProcessor.from_pretrained(MODEL_ID)
         
-        # 다운로드 완료 후 우리만의 창고(SAVE_PATH)에 저장합니다.
+        # 가져온 모델을 우리 창고(SAVE_PATH)에 영구 저장
         model.save_pretrained(SAVE_PATH)
         processor.save_pretrained(SAVE_PATH)
-        print(f"--- 모델 저장 완료: {SAVE_PATH} ---")
-    
-    # 2. 이제 폴더가 확실히 있으니, 거기서 로컬로 불러옵니다.
-    print(f"--- 로컬 경로({SAVE_PATH})에서 모델을 로드합니다 ---")
+        print(f"--- 다운로드 및 창고 저장 완료! (위치: {SAVE_PATH}) ---")
+    else:
+        print(f"--- 창고에 이미 모델이 있습니다. 바로 꺼내서 쓰겠습니다. ---")
+
+    # 2. 이제 창고(로컬)에 있는 모델을 읽어서 GPU에 올림
+    print("--- GPU로 모델 로딩 중... ---")
     model = CLIPModel.from_pretrained(SAVE_PATH).to(device)
     processor = CLIPProcessor.from_pretrained(SAVE_PATH)
     return model, processor
 
-# 모델 로드 (최초 실행 시 다운로드 혹은 로드 수행)
+# 서버 시작 전 모델 로드 실행
 model, processor = load_model()
 
 def handler(job):
@@ -43,20 +50,21 @@ def handler(job):
         if not image_url:
             return {"error": "image_url이 필요합니다."}
 
-        # 이미지 처리
-        response = requests.get(image_url, timeout=10)
+        # 이미지 다운로드 및 전처리
+        response = requests.get(image_url, timeout=15)
         image = Image.open(BytesIO(response.content)).convert("RGB")
         
+        # 모델 추론
         inputs = processor(images=image, return_tensors="pt").to(device)
-        
         with torch.no_grad():
             image_features = model.get_image_features(**inputs)
         
+        # 결과 반환
         embedding = image_features.cpu().numpy().tolist()[0]
         return {"embedding": embedding}
 
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": f"실행 중 에러 발생: {str(e)}"}
 
-# 런팟 서버리스 시작
+# 런팟 서버리스 엔진 시작
 runpod.serverless.start({"handler": handler})
