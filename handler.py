@@ -7,8 +7,10 @@ from transformers import CLIPProcessor, CLIPModel
 
 # 1. 모델 로드 (서버 시작 시 한 번만 실행됨)
 device = "cuda" if torch.cuda.is_available() else "cpu"
-model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(device)
-processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+
+# local_files_only=True 추가 및 .to(device)로 메모리에 올리기
+model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32", local_files_only=True).to(device)
+processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32", local_files_only=True)
 
 def handler(job):
     """
